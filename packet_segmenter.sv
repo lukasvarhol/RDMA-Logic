@@ -63,14 +63,14 @@ module packet_segmenter #(
           if (oREADY && iVALID) begin
             // write to buffer 
             buffer[write_ptr * AXI_FRAME_SIZE +: AXI_FRAME_SIZE] <= iDMA_DATA;
-            write_ptr <= (write_ptr < LCM/AXI_FRAME_SIZE) ? write_ptr + 1 : 0;
+            write_ptr <= (write_ptr + 1 >= LCM/AXI_FRAME_SIZE) ? 0 : write_ptr + 1;
           end 
 
           if (bits_available >= MTU && iREADY) begin
             // read from buffer
             oDATA_PACKET <= buffer[read_ptr * MTU +: MTU];
             oVALID <= 1;
-            read_ptr <= (read_ptr < LCM/MTU) ? read_ptr + 1 : 0;
+            read_ptr <= (read_ptr + 1 >= LCM/MTU) ? 0 : write_ptr + 1;
           end else begin
             oDATA_PACKET <= 0;
             oVALID <= 0;
