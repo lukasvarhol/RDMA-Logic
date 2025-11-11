@@ -4,15 +4,15 @@ module packet_segmenter #(
   )
   (
   //! INPUTS
-  input logic iClk, iRst,
-  input logic [AXI_FRAME_SIZE-1:0] iDMA_DATA,
-  input logic iVALID,
-  input logic iREADY,
+  input logic clk, rst,
+  input logic [AXI_FRAME_SIZE-1:0] s_axis_tdata,
+  input logic s_axis_tvalid,
+  input logic s_axis_tready,
 
   //! OUTPUTS
-  output logic [MTU-1:0] oDATA_PACKET,
-  output logic oVALID,
-  output logic oREADY
+  output logic [MTU-1:0] m_axis_tdata,
+  output logic m_axis_tvalid,
+  output logic m_axis_tready
   );
 
   // HELPER FUNCTIONS
@@ -37,60 +37,53 @@ module packet_segmenter #(
 
     generate 
     if (MTU == AXI_FRAME_SIZE) begin : BUFFER_BYPASS
-      assign oDATA_PACKET = iDMA_DATA;
-      assign oVALID = iVALID;
-      assign oREADY = iREADY;
+      assign m_axis_tdata = s_axis_tdata;
+      assign m_axis_tvalid = s_axis_tvalid;
+      assign m_axis_tready = s_axis_tready;
     end else begin : BUFFER_PATH
       // INTERNAL VARIABLES
       localparam int LCM = lcm(AXI_FRAME_SIZE, MTU);
-      logic [LCM-1:0] buffer;
+      logic [LCM-1:0]                        buffer;
       logic [$clog2(LCM/AXI_FRAME_SIZE)-1:0] write_ptr;  
-      logic [$clog2(LCM/MTU)-1:0] read_ptr;
-      logic [$clog2(LCM):0] bits_available;
-      
+      logic [$clog2(LCM/MTU)-1:0]            read_ptr;
+      logic [$clog2(LCM):0]                  bits_stored;
+            
       // PROCESSES
-      always_ff @(posedge iClk) begin
-        if (iRst) begin
-          buffer <= '0;
+      always_ff @(posedge clk) begin
+        if (rst) begin
           write_ptr <= '0;
-          read_ptr <= '0;
-          bits_available <= '0;
-          oDATA_PACKET <= '0;
-          oVALID <= '0;
+          read_ptr <= LCM/MTU - 1;
+          bits_stored <= '0;
         end
 
-        else begin
-          if (oREADY && iVALID) begin
-            // write to buffer 
-            buffer[write_ptr * AXI_FRAME_SIZE +: AXI_FRAME_SIZE] <= iDMA_DATA;
-            write_ptr <= (write_ptr + 1 >= LCM/AXI_FRAME_SIZE) ? 0 : write_ptr + 1;
-          end 
+        case ({(m_axis_tvalid), (s_axis_tready && s_axis_tvalid && m_axis_tready)})
+        //[0]: write, [1]: read
+          2'b01: begin 
+            bits_stored <= bits_stored + AXI_FRAME_SIZE; // write only 
+            write_ptr <= (write_ptr >= LCM/AXI_FRAME_SIZE - 1) ? 0 : write_ptr + 1;
+          end
+          2'b10: begin 
+            bits_stored <= bits_stored - MTU; // read only 
+            read_ptr <= (read_ptr <= 0) ? (LCM/MTU - 1) : read_ptr - 1; //bigendian
+          end
+          2'b11: begin 
+            bits_stored <= bits_stored + AXI_FRAME_SIZE - MTU; // read & write
+            write_ptr <= (write_ptr >= LCM/AXI_FRAME_SIZE - 1) ? 0 : write_ptr + 1;
+            read_ptr <= (read_ptr <= 0) ? (LCM/MTU - 1) : read_ptr - 1; 
+          end
+        endcase
 
-          if (bits_available >= MTU && iREADY) begin
-            // read from buffer
-            oDATA_PACKET <= buffer[read_ptr * MTU +: MTU];
-            oVALID <= 1;
-            read_ptr <= (read_ptr + 1 >= LCM/MTU) ? 0 : write_ptr + 1;
-          end else begin
-            oDATA_PACKET <= 0;
-            oVALID <= 0;
-          end
-          
-          if ((oREADY && iVALID) && (bits_available >= MTU && iREADY)) begin
-          // Both write and read
-            bits_available <= bits_available + AXI_FRAME_SIZE - MTU;
-          end
-          else if (oREADY && iVALID) begin
-          // Only write
-            bits_available <= bits_available + AXI_FRAME_SIZE;
-          end
-          else if (bits_available >= MTU && iREADY) begin
-          // Only read
-            bits_available <= bits_available - MTU;
-          end
+        if (s_axis_tready && s_axis_tvalid && m_axis_tready) begin
+         // write to buffer 
+          buffer[write_ptr * AXI_FRAME_SIZE +: AXI_FRAME_SIZE] <= s_axis_tdata;
         end
+
       end
-      assign oREADY = (bits_available + AXI_FRAME_SIZE) <= LCM;
+
+      assign m_axis_tready = (bits_stored + AXI_FRAME_SIZE) <= LCM;
+      assign m_axis_tdata = buffer[read_ptr * MTU +: MTU] & {MTU{m_axis_tvalid}}; //zero if no new data to output
+      assign m_axis_tvalid = (bits_stored>=MTU);
+
     end
   endgenerate 
 endmodule
