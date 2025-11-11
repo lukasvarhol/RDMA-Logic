@@ -34,6 +34,13 @@ module packet_segmenter #(
     else 
       return (a / gcd(a, b)) * b;
   endfunction
+  
+  initial begin
+  assert (AXI_FRAME_SIZE == 128)
+    else $warning("Non-standard AXI width for video; 128-bit expected");
+  assert (MTU > 0 && MTU <= 128 && (128 % MTU == 0))
+    else $warning("MTU should divide 128 for clean video packing");
+  end
 
   generate 
   if (MTU == AXI_FRAME_SIZE) begin : BUFFER_BYPASS
