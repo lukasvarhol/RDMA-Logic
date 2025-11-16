@@ -3,16 +3,18 @@ module packet_segmenter #(
   parameter AXI_FRAME_SIZE = 128
   )
   (
-  //! INPUTS
+  //! INPUTS/OUTPUTS
   input logic clk, rst,
+  
   input logic [AXI_FRAME_SIZE-1:0] s_axis_tdata,
   input logic s_axis_tvalid,
-  input logic s_axis_tready,
+  output logic s_axis_tready,
+  input logic s_axis_tlast,
 
-  //! OUTPUTS
   output logic [MTU-1:0] m_axis_tdata,
   output logic m_axis_tvalid,
-  output logic m_axis_tready
+  input logic m_axis_tready,
+  output logic m_axis_tlast
   );
 
   // HELPER FUNCTIONS
@@ -46,7 +48,8 @@ module packet_segmenter #(
   if (MTU == AXI_FRAME_SIZE) begin : BUFFER_BYPASS
     assign m_axis_tdata = s_axis_tdata;
     assign m_axis_tvalid = s_axis_tvalid;
-    assign m_axis_tready = s_axis_tready;
+    assign s_axis_tready = m_axis_tready;
+    assign m_axis_tlast = s_axis_tlast;
   end : BUFFER_BYPASS 
   else begin : BUFFER_PATH
     // INTERNAL VARIABLES
@@ -55,29 +58,47 @@ module packet_segmenter #(
     logic [$clog2(LCM/AXI_FRAME_SIZE)-1:0] write_ptr;  
     logic [$clog2(LCM/MTU)-1:0]            read_ptr;
     logic [$clog2(LCM):0]                  bits_stored;
+
+    logic input_last_seen;
+    logic [$clog2(LCM/MTU)-1:0] packets_remaining;
             
     // PROCESSES
     always_ff @(posedge clk) begin
       if (rst) begin
         write_ptr <= '0;
-        read_ptr <= LCM/MTU - 1;
+        read_ptr <= '0;
         bits_stored <= '0;
+        input_last_seen <= '0;
+        packets_remaining <= '0;
+    end else begin
+      if (s_axis_tvalid && s_axis_tready && s_axis_tlast) begin
+        input_last_seen <= 1'b1;
+        packets_remaining <= ((bits_stored + AXI_FRAME_SIZE) + MTU - 1 ) / MTU;
+      end
+
+      if (m_axis_tvalid && m_axis_tready && m_axis_tlast) begin
+        input_last_seen <= 1'b0;
+        packets_remaining <= '0;
       end
 
       case ({(m_axis_tvalid), (s_axis_tready && s_axis_tvalid && m_axis_tready)})
-      //[0]: write, [1]: read
+      //[1]: read, [0]: write 
         2'b01: begin 
           bits_stored <= bits_stored + AXI_FRAME_SIZE; // write only 
           write_ptr <= (write_ptr >= LCM/AXI_FRAME_SIZE - 1) ? 0 : write_ptr + 1;
         end
         2'b10: begin 
           bits_stored <= bits_stored - MTU; // read only 
-          read_ptr <= (read_ptr <= 0) ? (LCM/MTU - 1) : read_ptr - 1; //bigendian
+          read_ptr <= (read_ptr >= LCM/MTU - 1) ? 0 : read_ptr + 1;
+          if (packets_remaining > 0)
+            packets_remaining <= packets_remaining - 1;
         end
         2'b11: begin 
           bits_stored <= bits_stored + AXI_FRAME_SIZE - MTU; // read & write
           write_ptr <= (write_ptr >= LCM/AXI_FRAME_SIZE - 1) ? 0 : write_ptr + 1;
-          read_ptr <= (read_ptr <= 0) ? (LCM/MTU - 1) : read_ptr - 1; 
+          read_ptr <= (read_ptr >= LCM/MTU - 1) ? 0 : read_ptr + 1;
+          if (packets_remaining > 0)
+            packets_remaining <= packets_remaining - 1;
         end
       endcase
 
@@ -85,12 +106,14 @@ module packet_segmenter #(
         // write to buffer 
         buffer[write_ptr * AXI_FRAME_SIZE +: AXI_FRAME_SIZE] <= s_axis_tdata;
       end
+    end
 
     end
 
-    assign m_axis_tready = (bits_stored + AXI_FRAME_SIZE) <= LCM;
-    assign m_axis_tdata = buffer[read_ptr * MTU +: MTU] & {MTU{m_axis_tvalid}}; //zero if no new data to output
-    assign m_axis_tvalid = (bits_stored>=MTU);
+    assign s_axis_tready = (bits_stored + AXI_FRAME_SIZE) <= LCM;
+    assign m_axis_tdata = buffer[read_ptr * MTU +: MTU] & {MTU{m_axis_tvalid}};     
+    assign m_axis_tvalid = (bits_stored>=MTU) || (input_last_seen && packets_remaining > 0);
+    assign m_axis_tlast = input_last_seen && (packets_remaining == 1);
 
   end : BUFFER_PATH
   endgenerate 
